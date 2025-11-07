@@ -3,14 +3,14 @@ name: Build Kivy APK
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: # allows manual trigger
+  workflow_dispatch: # allows manual run from Actions tab
 
 jobs:
   build-apk:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -18,25 +18,39 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
           sudo apt update
-          sudo apt install -y git zip unzip openjdk-17-jdk python3-pip libffi-dev libssl-dev
+          sudo apt install -y git zip unzip openjdk-17-jdk python3-pip libffi-dev libssl-dev autoconf automake libtool pkg-config
           pip install --upgrade pip
           pip install buildozer cython kivy
 
-      - name: Initialize Buildozer
+      - name: Install Android SDK & NDK manually (with AIDL)
+        run: |
+          mkdir -p ~/.buildozer/android/platform/android-sdk
+          cd ~/.buildozer/android/platform
+          wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
+          unzip cmdline-tools.zip
+          mkdir -p android-sdk/cmdline-tools/latest
+          mv cmdline-tools/* android-sdk/cmdline-tools/latest/
+          yes | android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$HOME/.buildozer/android/platform/android-sdk "platform-tools" "platforms;android-33" "build-tools;33.0.2" "ndk;25.1.8937393" "cmdline-tools;latest"
+          yes | android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=$HOME/.buildozer/android/platform/android-sdk
+
+      - name: Initialize Buildozer (if not already)
         run: |
           if [ ! -f buildozer.spec ]; then buildozer init; fi
           sed -i 's/^requirements =.*/requirements = python3,kivy/' buildozer.spec
           sed -i 's/^source.include_exts =.*/source.include_exts = py,png,jpg,mp3,wav,kv/' buildozer.spec
+          sed -i 's/^# android.api =.*/android.api = 33/' buildozer.spec
+          sed -i 's/^# android.minapi =.*/android.minapi = 21/' buildozer.spec
+          sed -i 's/^# android.sdk_path =.*/android.sdk_path = \/home\/runner\/.buildozer\/android\/platform\/android-sdk/' buildozer.spec
 
-      - name: Build APK
+      - name: Build the APK
         run: |
           buildozer android debug
 
-      - name: Upload APK artifact
+      - name: Upload generated APK
         uses: actions/upload-artifact@v4
         with:
-          name: Kivy-APK
+          name: SubwayRunner-APK
           path: bin/*.apk
