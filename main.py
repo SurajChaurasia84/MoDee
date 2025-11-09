@@ -1,200 +1,319 @@
-import kivy
-from kivy.app import App
-from kivy.uix.widget import Widget
-from kivy.properties import ObjectProperty, NumericProperty, BooleanProperty
-from kivy.vector import Vector
-from kivy.clock import Clock
-from kivy.core.audio import SoundLoader
-from kivy.uix.image import Image
-from kivy.lang import Builder
+import pygame
 import random
-import os
 import sys
+import os
 
-kivy.require('2.1.0')
+# --------------------- INIT ---------------------
+pygame.init()
+pygame.mixer.init() 
+WIDTH, HEIGHT = 600, 800
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Subway Runner: Modi Edition 🚗")
+clock = pygame.time.Clock()
+font = pygame.font.SysFont("Arial", 30)
 
-# --- KV Layout ---
-KV = '''
-<Player>:
-    source: 'assets/player.png'
-    size_hint: None, None
-    size: 80, 80
+# --------------------- COLORS ---------------------
+WHITE = (255, 255, 255)
+SKY = (120, 200, 255)
+ROAD_GRAY = (50, 50, 50)
+YELLOW = (255, 220, 0)
+GOLD = (255, 200, 0)
+COIN_HIGHLIGHT = (255, 255, 150)
+GAME_OVER_COLOR = (255, 60, 60)
+MUSIC_CONTROL_COLOR = (0, 255, 0)
 
-<Obstacle>:
-    source: 'assets/enemy.png'
-    size_hint: None, None
-    size: 80, 80
+# --------------------- CONSTANTS ---------------------
+LANES_X = [WIDTH // 2 - 150, WIDTH // 2, WIDTH // 2 + 150]
+GROUND_Y = HEIGHT - 180
+GRAVITY = 8
+SPEED = 10
+FPS = 60
+SPEED_INCREASE_RATE = 0.5 
+SPEED_INCREASE_INTERVAL = 600 
 
-<RunnerGame>:
-    player: runner_player
+# --------------------- ASSET SETUP ---------------------
+ASSET_DIR = "assets"
+os.makedirs(ASSET_DIR, exist_ok=True)
+
+def load_image(name, size):
+    """Loads and scales an image, returning a placeholder if unsuccessful."""
+    path = os.path.join(ASSET_DIR, name)
+    if os.path.exists(path):
+        try:
+            img = pygame.image.load(path).convert_alpha()
+            return pygame.transform.scale(img, size)
+        except pygame.error:
+            pass
     
-    canvas.before:
-        Color:
-            rgb: 0.3, 0.6, 1
-        Rectangle:
-            size: self.size
-            pos: self.pos
-        Color:
-            rgb: 0.2, 0.2, 0.2
-        Rectangle:
-            size: self.width, 100
-            pos: self.x, self.y
+    print(f"⚠️ Missing asset: {name}, using placeholder.")
+    surf = pygame.Surface(size, pygame.SRCALPHA)
+    if 'player' in name:
+        pygame.draw.rect(surf, (0, 0, 255, 200), surf.get_rect())
+    elif 'enemy' in name:
+        pygame.draw.rect(surf, (255, 0, 0, 200), surf.get_rect())
+    return surf
 
-    Player:
-        id: runner_player
-        pos: self.parent.center_x - 40 if self.parent else 0, 100
+player_img = load_image("player.png", (100, 120))
+enemy_img = load_image("enemy.png", (100, 100))
 
-    Label:
-        font_size: 24
-        text: 'Score: ' + str(root.score)
-        pos_hint: {"x": 0.02, "top": 0.98}
-        size_hint: None, None
-        height: 30
-        width: 150
+# --------------------- SOUND HANDLING ---------------------
+BG_MUSIC_PATH = os.path.join(ASSET_DIR, "bg_music.mp3")
+# Removed: OVER_SOUND_PATH
+# Re-using the sound loading utility for coin if available
+COIN_SOUND_PATH = os.path.join(ASSET_DIR, "coin_sound.mp3") 
 
-    Label:
-        id: game_over_label
-        font_size: 48
-        text: 'Game Over' if root.game_over else ''
-        color: 1, 0, 0, 1
-        center_x: root.center_x
-        center_y: root.center_y
-'''
+def load_sfx(path):
+    """Loads a sound effect using Sound(), or returns None if file is missing/unsupported."""
+    if not os.path.exists(path):
+        return None
+    try:
+        return pygame.mixer.Sound(path)
+    except pygame.error:
+        return None
 
-# --- Player ---
-class Player(Image):
-    velocity_x = NumericProperty(0)
-    gravity = NumericProperty(-2000)
-    jump_velocity = NumericProperty(800)
-    is_jumping = NumericProperty(0)
+coin_sfx = load_sfx(COIN_SOUND_PATH)
+# Removed: game_over_sfx
 
-    def move(self, dt):
-        lane_width = self.parent.width / 3
-        self.x += self.velocity_x * dt
+music_playing = False
 
-        # Clamp to screen lanes
-        if self.center_x < lane_width / 2:
-            self.center_x = lane_width / 2
-        elif self.center_x > self.parent.width - lane_width / 2:
-            self.center_x = self.parent.width - lane_width / 2
+def start_bg_music():
+    """Starts background music using mixer.music."""
+    global music_playing
+    if os.path.exists(BG_MUSIC_PATH):
+        try:
+            pygame.mixer.music.load(BG_MUSIC_PATH)
+            pygame.mixer.music.play(-1)
+            pygame.mixer.music.set_volume(0.5)
+            music_playing = True
+        except pygame.error as e:
+            print(f"⚠️ Could not play bg_music: {e}")
+            music_playing = False
+    else:
+        print("⚠️ bg_music.mp3 not found — running silent mode.")
+        music_playing = False
 
-        # Jumping logic
-        if self.is_jumping == 1:
-            self.y += self.jump_velocity * dt
-            self.jump_velocity += self.gravity * dt
+def toggle_music():
+    """Toggles background music playback."""
+    global music_playing
+    if music_playing:
+        pygame.mixer.music.pause()
+        music_playing = False
+    else:
+        # Check if music is stopped or just paused
+        if pygame.mixer.music.get_busy() or pygame.mixer.music.get_pos() > 0:
+            pygame.mixer.music.unpause()
+        else:
+            # If not started yet or fully stopped
+            start_bg_music() 
+        music_playing = True
 
-            ground_y = self.parent.y + 100
-            if self.y <= ground_y:
-                self.y = ground_y
-                self.is_jumping = 0
-                self.jump_velocity = 800
+start_bg_music() # Start music at program launch
+
+# --------------------- CLASSES ---------------------
+class Player:
+    def __init__(self):
+        self.lane = 1
+        self.x = LANES_X[self.lane]
+        self.y = GROUND_Y
+        self.jump_vel = 0
+        self.is_jumping = False
+        self.alive = True
+
+    @property
+    def rect(self):
+        w, h = player_img.get_size()
+        return pygame.Rect(self.x - w // 2, self.y - h, w, h)
+
+    def move_left(self):
+        if not self.is_jumping and self.lane > 0: # Added is_jumping check for realism
+            self.lane -= 1
+            self.x = LANES_X[self.lane]
+
+    def move_right(self):
+        if not self.is_jumping and self.lane < 2: # Added is_jumping check for realism
+            self.lane += 1
+            self.x = LANES_X[self.lane]
 
     def jump(self):
-        if self.is_jumping == 0:
-            self.is_jumping = 1
+        if not self.is_jumping:
+            self.is_jumping = True
+            self.jump_vel = -30
 
-    def change_lane(self, direction):
-        lane_width = self.parent.width / 3
-        target_x = self.center_x + direction * lane_width
-        self.center_x = target_x
+    def update(self):
+        if self.is_jumping:
+            self.y += self.jump_vel
+            self.jump_vel += GRAVITY
+            if self.y >= GROUND_Y:
+                self.y = GROUND_Y
+                self.is_jumping = False
+    
+    def draw(self, surf):
+        surf.blit(player_img, (self.x - player_img.get_width() // 2, self.y - player_img.get_height()))
 
+class Enemy:
+    def __init__(self):
+        self.lane = random.randint(0, 2)
+        self.x = LANES_X[self.lane]
+        self.y = -100
+        self.size = enemy_img.get_size()
 
-# --- Obstacle ---
-class Obstacle(Image):
-    scroll_speed = NumericProperty(300)
+    @property
+    def rect(self):
+        w, h = self.size
+        return pygame.Rect(self.x - w // 2, self.y, w, h)
 
-    def move(self, dt):
-        self.x -= self.scroll_speed * dt
-        if self.right < 0:
-            if self.parent:
-                self.parent.remove_widget(self)
+    def update(self, speed):
+        self.y += speed
 
+    def draw(self, surf):
+        surf.blit(enemy_img, (self.x - self.size[0] // 2, self.y))
 
-# --- Main Game Logic ---
-class RunnerGame(Widget):
-    player = ObjectProperty(None)
-    score = NumericProperty(0)
-    game_over = BooleanProperty(False)
+class Coin:
+    def __init__(self):
+        self.lane = random.randint(0, 2)
+        self.x = LANES_X[self.lane]
+        self.y = -50
+        self.r = 20
+        self.collected = False
 
-    def __init__(self, **kwargs):
-        super(RunnerGame, self).__init__(**kwargs)
-        self.obstacles = []
-        self.passed_obstacles = []
+    @property
+    def rect(self):
+        return pygame.Rect(self.x - self.r, self.y - self.r, self.r * 2, self.r * 2)
 
-        # Load sounds safely
-        self.bg_music = SoundLoader.load('assets/bg_music.mp3') if os.path.exists('assets/bg_music.mp3') else None
-        self.over_sound = SoundLoader.load('assets/over.mp3') if os.path.exists('assets/over.mp3') else None
+    def update(self, speed):
+        self.y += speed
 
-        if self.bg_music:
-            self.bg_music.loop = True
-            self.bg_music.play()
+    def draw(self, surf):
+        pygame.draw.circle(surf, GOLD, (self.x, int(self.y)), self.r)
+        pygame.draw.circle(surf, COIN_HIGHLIGHT, (self.x, int(self.y)), self.r, 3)
 
-        self.bind(on_touch_down=self.on_mobile_touch)
+# --------------------- HELPERS ---------------------
+def draw_background(offset):
+    """Draws the sky, road, and moving lane markers."""
+    screen.fill(SKY)
+    pygame.draw.rect(screen, ROAD_GRAY, (0, HEIGHT // 3, WIDTH, HEIGHT))
+    
+    # Adjusted loop for cleaner scrolling across the screen
+    for i in range(15): 
+        y = (i * 150 + offset) % (HEIGHT * 2) - HEIGHT
+        if y < HEIGHT:
+            for lx in LANES_X:
+                pygame.draw.rect(screen, YELLOW, (lx - 5, y, 10, 80))
 
-        Clock.schedule_interval(self.update, 1 / 60)
-        Clock.schedule_interval(self.spawn_obstacle, 2.5)
+def draw_text_center(text, y, size=50, color=WHITE):
+    """Draws centered text on the screen."""
+    f = pygame.font.SysFont("Arial", size, True)
+    t = f.render(text, True, color)
+    screen.blit(t, (WIDTH // 2 - t.get_width() // 2, y))
 
-    def update(self, dt):
-        if self.game_over:
-            return
+def draw_hud():
+    """Draws score and music status."""
+    screen.blit(font.render(f"Score: {score}", True, WHITE), (20, 20))
+    screen.blit(font.render(f"High: {high_score}", True, WHITE), (20, 60))
+    
+    # Music status indicator
+    music_status = "ON" if music_playing else "OFF"
+    status_color = MUSIC_CONTROL_COLOR if music_playing else GAME_OVER_COLOR
+    
+    music_text = font.render(f"Music (M): {music_status}", True, status_color)
+    screen.blit(music_text, (WIDTH - music_text.get_width() - 20, 20))
 
-        self.player.move(dt)
+def new_game():
+    """Resets all game variables for a fresh start. Returns 6 values."""
+    return Player(), [], [], 0, SPEED, 0
 
-        for obstacle in list(self.obstacles):
-            obstacle.move(dt)
+# --------------------- GAME STATE ---------------------
+player, enemies, coins, score, speed, frame = new_game()
+high_score = 0
+offset = 0 
+running = True
 
-            if self.player.collide_widget(obstacle):
-                self.game_end()
-                return
+# --------------------- MAIN LOOP ---------------------
+while running:
+    clock.tick(FPS)
+    for e in pygame.event.get():
+        if e.type == pygame.QUIT:
+            running = False
+        if e.type == pygame.KEYDOWN:
+            
+            # Global Music Toggle (M key)
+            if e.key == pygame.K_m:
+                toggle_music()
+            
+            if e.key == pygame.K_ESCAPE:
+                running = False
+            
+            if player.alive:
+                if e.key == pygame.K_LEFT: 
+                    player.move_left()
+                if e.key == pygame.K_RIGHT: 
+                    player.move_right()
+                if e.key == pygame.K_UP: 
+                    player.jump()
+            elif e.key == pygame.K_r: # Restart key
+                player, enemies, coins, score, speed, frame = new_game() 
+                if music_playing:
+                    # Only restart music if it was playing before
+                    start_bg_music() 
 
-            if obstacle.right < self.player.x and obstacle not in self.passed_obstacles:
-                self.score += 1
-                self.passed_obstacles.append(obstacle)
+    # --- Game Active Logic ---
+    if player.alive:
+        player.update()
+        
+        offset = (offset + speed) % 150 
 
-    def spawn_obstacle(self, dt):
-        if self.game_over:
-            return
+        if frame % 60 == 0:
+            if random.random() < 0.6:
+                enemies.append(Enemy())
+            else:
+                coins.append(Coin())
 
-        lane_width = self.width / 3
-        lane = random.choice([0, 1, 2])
-        x_pos = self.width + 100
-        y_pos = self.y + 100
+        for en in enemies: en.update(speed)
+        for c in coins: c.update(speed)
 
-        obstacle = Obstacle()
-        obstacle.center_x = x_pos
-        obstacle.y = y_pos
-        obstacle.center_x = lane_width * (lane + 0.5)
+        enemies = [en for en in enemies if en.y < HEIGHT + 100]
+        coins = [c for c in coins if c.y < HEIGHT + 100 and not c.collected]
 
-        self.add_widget(obstacle)
-        self.obstacles.append(obstacle)
+        # Collision detection (Enemy)
+        for en in enemies:
+            if en.rect.colliderect(player.rect):
+                player.alive = False
+                pygame.mixer.music.stop() # Stop music, regardless of its previous state
+                # Removed ALL game over sound logic
 
-    def game_end(self):
-        self.game_over = True
-        if self.bg_music:
-            self.bg_music.stop()
-        if self.over_sound:
-            self.over_sound.play()
+        # Collision detection (Coin)
+        for c in coins:
+            if not c.collected and c.rect.colliderect(player.rect):
+                c.collected = True
+                score += 1
+                if coin_sfx:
+                    coin_sfx.play()
 
-    def on_mobile_touch(self, touch):
-        if self.game_over:
-            # Restart game by reloading
-            App.get_running_app().stop()
-            os.execl(sys.executable, sys.executable, *sys.argv)
+        # Score and Speed Increase
+        frame += 1
+        if frame % SPEED_INCREASE_INTERVAL == 0:
+            speed += SPEED_INCREASE_RATE
 
-        if touch.is_double_tap:
-            self.player.jump()
-        elif touch.pos[0] < self.width / 2:
-            self.player.change_lane(-1)
-        else:
-            self.player.change_lane(1)
+    # --- Draw Everything ---
+    draw_background(offset)
+    for en in enemies: en.draw(screen)
+    for c in coins:
+        if not c.collected: c.draw(screen)
+    player.draw(screen)
 
+    draw_hud() # Draw Score and Music Status
 
-# --- App ---
-class SubwayRunnerApp(App):
-    def build(self):
-        Builder.load_string(KV)
-        return RunnerGame()
+    # --- Game Over Screen ---
+    if not player.alive:
+        draw_text_center("CRASH!", HEIGHT // 2 - 80, 80, GAME_OVER_COLOR)
+        draw_text_center(f"Final Score: {score}", HEIGHT // 2, 40)
+        draw_text_center("Press R to Restart", HEIGHT // 2 + 80, 30)
+        if score > high_score:
+            high_score = score
+            draw_text_center("New High Score!", HEIGHT // 2 + 120, 30, YELLOW)
 
+    pygame.display.flip()
 
-if __name__ == '__main__':
-    SubwayRunnerApp().run()
+# --------------------- Cleanup ---------------------
+pygame.quit()
+sys.exit()
